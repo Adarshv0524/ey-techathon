@@ -60,12 +60,6 @@ Option A: GUI
 - Click "New" and add the Tesseract folder path.
 - Click "OK" to save.
 
-Option B: PowerShell (run as Administrator)
-
-```powershell
-$tesseractPath = "C:\Program Files\Tesseract-OCR"
-[Environment]::SetEnvironmentVariable("Path", $env:Path + ";" + $tesseractPath, "Machine")
-```
 
 4. Open a new terminal and verify:
 
@@ -97,5 +91,6 @@ python run_backend.py
 ```bash
 python run_frontend.py
 ```
+
 
 Open http://127.0.0.1:5000/ in your browser.
