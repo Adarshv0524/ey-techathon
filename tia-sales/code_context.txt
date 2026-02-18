@@ -1,0 +1,3087 @@
+=======================================================
+app\config.py
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Optional
+import os
+import platform
+
+
+class Settings(BaseSettings):
+    """Application configuration"""
+    
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=True,
+        extra='ignore'  # Ignore extra fields
+    )
+    
+    # API Configuration
+    APP_NAME: str = "TIA-Sales Personal Loan Agent"
+    APP_VERSION: str = "1.0.0"
+    DEBUG: bool = False
+    
+    # HuggingFace Configuration - Support multiple env var names
+    HF_API_KEY: Optional[str] = None
+    HUGGINGFACEHUB_API_TOKEN: Optional[str] = None
+    
+    HF_MODEL_CLASSIFICATION: str = "mistralai/Mistral-7B-Instruct-v0.3"
+    HF_MODEL_EXTRACTION: str = "mistralai/Mistral-7B-Instruct-v0.3"
+    HF_MODEL_GENERATION: str = "mistralai/Mistral-7B-Instruct-v0.3"
+    HF_API_URL: str = "https://api-inference.huggingface.co/models"
+    HF_TIMEOUT: int = 30
+    
+    # Session Configuration
+    SESSION_BACKEND: str = "memory"
+    REDIS_URL: Optional[str] = "redis://localhost:6379"
+    SESSION_EXPIRY: int = 3600
+    
+    # OCR Configuration - Windows Auto-detection
+    OCR_CONFIDENCE_THRESHOLD: float = 0.6
+    TESSERACT_CMD: Optional[str] = None
+    SUPPORTED_IMAGE_FORMATS: list = [".jpg", ".jpeg", ".png", ".pdf"]
+    MAX_FILE_SIZE_MB: int = 10
+    
+    # PDF Generation
+    OUTPUT_PDF_DIR: str = "./generated_documents"
+    COMPANY_NAME: str = "TIA Personal Loans Pvt. Ltd."
+    COMPANY_ADDRESS: str = "123 Finance Street, Mumbai, Maharashtra 400001"
+    COMPANY_PHONE: str = "+91-22-1234-5678"
+    COMPANY_EMAIL: str = "support@tialoans.com"
+    
+    # Loan Configuration
+    MIN_LOAN_AMOUNT: float = 50000.0
+    MAX_LOAN_AMOUNT: float = 5000000.0
+    
+    # Guardrails
+    INPUT_MAX_LENGTH: int = 1000
+    OFFENSIVE_KEYWORDS: list = ["hack", "bypass", "jailbreak", "ignore instructions"]
+    
+    def model_post_init(self, __context) -> None:
+        """Post-initialization processing"""
+        
+        # Use HUGGINGFACEHUB_API_TOKEN if HF_API_KEY not set
+        if not self.HF_API_KEY and self.HUGGINGFACEHUB_API_TOKEN:
+            self.HF_API_KEY = self.HUGGINGFACEHUB_API_TOKEN
+        
+        # Validate that we have an API key
+        if not self.HF_API_KEY:
+            raise ValueError("HuggingFace API key is required. Set HF_API_KEY or HUGGINGFACEHUB_API_TOKEN in .env")
+        
+        # Auto-detect Tesseract on Windows if not set
+        if platform.system() == "Windows" and not self.TESSERACT_CMD:
+            self.TESSERACT_CMD = self._find_tesseract_windows()
+        
+        # Create output directory
+        os.makedirs(self.OUTPUT_PDF_DIR, exist_ok=True)
+    
+    def _find_tesseract_windows(self) -> Optional[str]:
+        """Auto-detect Tesseract installation on Windows"""
+        common_paths = [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            r"C:\Tesseract-OCR\tesseract.exe",
+        ]
+        
+        # Check if tesseract is in PATH
+        import shutil
+        tesseract_path = shutil.which("tesseract")
+        if tesseract_path:
+            return tesseract_path
+        
+        # Check common installation paths
+        for path in common_paths:
+            if os.path.exists(path):
+                return path
+        
+        return None
+
+
+settings = Settings()
+
+
+=======================================================
+app\main.py
+import logging
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+from app.config import settings
+from app.api import chat, faq, consent, underwriting, documents
+from app.tools.rag.rag_engine import rag_engine
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup and shutdown events"""
+    # Startup
+    logger.info("Starting TIA-Sales Personal Loan Agent")
+    logger.info(f"Tesseract path: {settings.TESSERACT_CMD}")
+    logger.info(f"PDF output directory: {settings.OUTPUT_PDF_DIR}")
+    
+    await rag_engine.initialize()
+    logger.info("RAG engine initialized")
+    
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down TIA-Sales Personal Loan Agent")
+
+
+app = FastAPI(
+    title=settings.APP_NAME,
+    version=settings.APP_VERSION,
+    lifespan=lifespan
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include routers
+app.include_router(chat.router)
+app.include_router(faq.router)
+app.include_router(consent.router)
+app.include_router(underwriting.router)
+app.include_router(documents.router)
+
+
+@app.get("/")
+async def root():
+    """Health check endpoint"""
+    return {
+        "service": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "status": "operational",
+        "tesseract_configured": settings.TESSERACT_CMD is not None,
+        "pdf_output_dir": settings.OUTPUT_PDF_DIR
+    }
+
+
+@app.get("/health")
+async def health_check():
+    """Detailed health check"""
+    return {
+        "status": "healthy",
+        "service": settings.APP_NAME,
+        "version": settings.APP_VERSION,
+        "tesseract_path": settings.TESSERACT_CMD,
+        "pdf_generation": "enabled"
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=settings.DEBUG
+    )
+
+
+=======================================================
+app\mock_services.py
+import logging
+import asyncio
+from typing import Dict, Any
+import random
+
+logger = logging.getLogger(__name__)
+
+
+class MockCustomerService:
+    """Mock customer validation service"""
+    
+    async def validate_customer_id(self, customer_id: str) -> bool:
+        """Validate if customer ID exists"""
+        await asyncio.sleep(0.1)  # Simulate API call
+        
+        # For demo, accept any CUST ID with digits
+        if customer_id.startswith("CUST") and len(customer_id) > 8:
+            logger.info(f"Customer ID {customer_id} validated")
+            return True
+        
+        logger.warning(f"Customer ID {customer_id} invalid")
+        return False
+
+
+class MockUnderwritingService:
+    """Mock underwriting/credit assessment service"""
+    
+    async def assess_loan(
+        self,
+        customer_id: str,
+        loan_amount: float,
+        income_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Simulate loan underwriting"""
+        await asyncio.sleep(1)  # Simulate processing time
+        
+        # Extract income
+        monthly_salary = float(income_data.get("monthly_salary", 50000))
+        
+        # Simple underwriting logic
+        max_eligible = monthly_salary * 24  # 2 years of salary
+        
+        if loan_amount > max_eligible:
+            decision = "REJECTED"
+            reason = f"Requested amount exceeds eligible limit (₹{max_eligible:,.0f})"
+            approved_amount = 0
+            interest_rate = 0
+        
+        elif monthly_salary < 25000:
+            decision = "REJECTED"
+            reason = "Minimum income requirement not met (₹25,000/month)"
+            approved_amount = 0
+            interest_rate = 0
+        
+        else:
+            # Approve with varying interest rates
+            decision = "APPROVED"
+            reason = "All eligibility criteria met"
+            approved_amount = loan_amount
+            
+            # Interest rate based on amount
+            if loan_amount < 200000:
+                interest_rate = 12.5
+            elif loan_amount < 500000:
+                interest_rate = 11.5
+            else:
+                interest_rate = 10.5
+        
+        result = {
+            "decision": decision,
+            "reason": reason,
+            "approved_amount": approved_amount,
+            "interest_rate": interest_rate,
+            "customer_id": customer_id
+        }
+        
+        logger.info(f"Underwriting result: {result}")
+        return result
+
+
+# Global instances
+mock_customer_service = MockCustomerService()
+mock_underwriting_service = MockUnderwritingService()
+
+
+=======================================================
+app\__init__.py
+
+
+=======================================================
+app\api\chat.py
+import logging
+from fastapi import APIRouter, HTTPException, Body
+from pydantic import BaseModel
+from typing import Optional
+from app.core.session import session_manager
+from app.guardrails.input_guardrail import input_guardrail
+from app.graph.router import semantic_router, IntentType
+from app.graph.dialogue_manager import dialogue_manager
+from app.graph.response_synthesizer import response_synthesizer
+from app.tools.rag.rag_engine import rag_engine
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+
+class ChatRequest(BaseModel):
+    session_id: Optional[str] = None
+    message: str
+
+
+class ChatResponse(BaseModel):
+    session_id: str
+    response: str
+    current_state: str
+    slots: dict
+
+
+@router.post("/message", response_model=ChatResponse)
+async def send_message(request: ChatRequest = Body(...)):
+    """
+    Main conversational endpoint
+    
+    Processes user message through:
+    1. Input guardrails
+    2. Semantic router
+    3. Context manager
+    4. Dialogue manager OR RAG engine
+    5. Response synthesizer
+    6. Output guardrails
+    """
+    try:
+        # Validate input
+        is_valid, result = input_guardrail.validate(request.message)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail=result)
+        
+        sanitized_message = result
+        
+        # Get or create session
+        if request.session_id:
+            session = await session_manager.get_session(request.session_id)
+            if not session:
+                raise HTTPException(status_code=404, detail="Session not found or expired")
+        else:
+            session = await session_manager.create_session()
+        
+        # Add user message to history
+        session.add_message("user", sanitized_message)
+        
+        # Route message
+        intent = await semantic_router.route(sanitized_message, session.current_state.value)
+        logger.info(f"Intent: {intent}")
+        
+        # Handle based on intent
+        if intent == IntentType.GREETING:
+            # Handle greeting
+            if session.current_state.value == "GREETING":
+                structured_result = await dialogue_manager.process_task_action(
+                    sanitized_message,
+                    session
+                )
+            else:
+                structured_result = {
+                    "response": "Hello! How can I help you with your loan application?",
+                    "state_changed": False,
+                    "new_state": session.current_state.value,
+                    "slots_updated": {}
+                }
+        
+        elif intent == IntentType.KNOWLEDGE_QUERY:
+            # Handle knowledge query via RAG
+            rag_result = await rag_engine.query(sanitized_message)
+            structured_result = {
+                "response": rag_result["answer"],
+                "state_changed": False,
+                "new_state": session.current_state.value,
+                "slots_updated": {}
+            }
+        
+        elif intent == IntentType.TASK_ACTION:
+            # Handle task-oriented action
+            structured_result = await dialogue_manager.process_task_action(
+                sanitized_message,
+                session
+            )
+        
+        else:  # OUT_OF_SCOPE
+            structured_result = {
+                "response": "I'm specialized in helping with personal loan applications. Please ask questions related to loans, or let's continue with your application.",
+                "state_changed": False,
+                "new_state": session.current_state.value,
+                "slots_updated": {}
+            }
+        
+        # Synthesize response
+        final_response = await response_synthesizer.synthesize(
+            structured_result,
+            context={
+                "state": session.current_state.value,
+                "history": session.history,
+                "slots": session.slots
+            }
+        )
+        
+        # Add assistant response to history
+        session.add_message("assistant", final_response)
+        
+        # Update session
+        await session_manager.update_session(session)
+        
+        return ChatResponse(
+            session_id=session.session_id,
+            response=final_response,
+            current_state=session.current_state.value,
+            slots=session.slots
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing message: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.post("/new-session")
+async def create_new_session():
+    """Create a new conversation session"""
+    session = await session_manager.create_session()
+    return {"session_id": session.session_id}
+
+
+@router.get("/session/{session_id}")
+async def get_session_info(session_id: str):
+    """Retrieve session information"""
+    session = await session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    return session.to_dict()
+
+
+=======================================================
+app\api\consent.py
+import logging
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from app.core.session import session_manager
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/consent", tags=["consent"])
+
+
+class ConsentRequest(BaseModel):
+    session_id: str
+    consent: bool
+
+
+class ConsentResponse(BaseModel):
+    session_id: str
+    consent_recorded: bool
+    message: str
+
+
+@router.post("/record", response_model=ConsentResponse)
+async def record_consent(request: ConsentRequest):
+    """
+    Explicit consent recording endpoint
+    
+    Allows frontend to record consent separately
+    """
+    try:
+        session = await session_manager.get_session(request.session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        session.update_slot("consent", request.consent)
+        await session_manager.update_session(session)
+        
+        message = "Consent recorded successfully" if request.consent else "Consent declined"
+        
+        return ConsentResponse(
+            session_id=session.session_id,
+            consent_recorded=True,
+            message=message
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error recording consent: {e}")
+        raise HTTPException(status_code=500, detail="Failed to record consent")
+
+
+=======================================================
+app\api\documents.py
+import logging
+import os
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import FileResponse
+from app.core.session import session_manager
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/documents", tags=["documents"])
+
+
+@router.get("/download/{session_id}")
+async def download_decision_document(session_id: str):
+    """
+    Download the generated loan decision PDF document
+    """
+    try:
+        session = await session_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        pdf_path = session.get_slot("decision_document")
+        
+        if not pdf_path or not os.path.exists(pdf_path):
+            raise HTTPException(status_code=404, detail="Decision document not found")
+        
+        filename = os.path.basename(pdf_path)
+        
+        return FileResponse(
+            path=pdf_path,
+            media_type='application/pdf',
+            filename=filename,
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error downloading document: {e}")
+        raise HTTPException(status_code=500, detail="Failed to download document")
+
+
+@router.get("/list/{session_id}")
+async def list_session_documents(session_id: str):
+    """
+    List all generated documents for a session
+    """
+    try:
+        session = await session_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        pdf_path = session.get_slot("decision_document")
+        
+        documents = []
+        if pdf_path and os.path.exists(pdf_path):
+            stat_info = os.stat(pdf_path)
+            documents.append({
+                "filename": os.path.basename(pdf_path),
+                "path": pdf_path,
+                "size_bytes": stat_info.st_size,
+                "created_at": stat_info.st_ctime,
+                "download_url": f"/api/documents/download/{session_id}"
+            })
+        
+        return {
+            "session_id": session_id,
+            "documents": documents
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing documents: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list documents")
+
+
+=======================================================
+app\api\faq.py
+import logging
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from app.tools.rag.rag_engine import rag_engine
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/faq", tags=["faq"])
+
+
+class FAQRequest(BaseModel):
+    question: str
+
+
+class FAQResponse(BaseModel):
+    answer: str
+    sources: list
+    confidence: float
+
+
+@router.post("/ask", response_model=FAQResponse)
+async def ask_question(request: FAQRequest):
+    """
+    Standalone FAQ endpoint using RAG
+    
+    Answers loan policy questions without session context
+    """
+    try:
+        result = await rag_engine.query(request.question, top_k=3)
+        
+        return FAQResponse(
+            answer=result["answer"],
+            sources=result["sources"],
+            confidence=result["confidence"]
+        )
+    
+    except Exception as e:
+        logger.error(f"Error in FAQ query: {e}")
+        raise HTTPException(status_code=500, detail="Failed to process question")
+
+
+=======================================================
+app\api\underwriting.py
+import logging
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from typing import Optional
+from app.core.session import session_manager
+from app.mock_services import mock_underwriting_service
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/underwriting", tags=["underwriting"])
+
+
+class UnderwritingResponse(BaseModel):
+    session_id: str
+    decision: str
+    reason: str
+    approved_amount: float
+    interest_rate: float
+
+
+@router.post("/trigger/{session_id}", response_model=UnderwritingResponse)
+async def trigger_underwriting(session_id: str):
+    """
+    Manually trigger underwriting process
+    
+    Used for testing or explicit underwriting requests
+    """
+    try:
+        session = await session_manager.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        # Validate required slots
+        loan_amount = session.get_slot("loan_amount")
+        customer_id = session.get_slot("customer_id")
+        ocr_data = session.get_slot("ocr_data")
+        
+        if not all([loan_amount, customer_id, ocr_data]):
+            raise HTTPException(
+                status_code=400,
+                detail="Missing required information for underwriting"
+            )
+        
+        # Perform underwriting
+        result = await mock_underwriting_service.assess_loan(
+            customer_id=customer_id,
+            loan_amount=loan_amount,
+            income_data=ocr_data.get("salary_slip", {}).get("data", {})
+        )
+        
+        session.update_slot("underwriting_result", result)
+        session.update_slot("decision", result["decision"])
+        await session_manager.update_session(session)
+        
+        return UnderwritingResponse(
+            session_id=session_id,
+            decision=result["decision"],
+            reason=result["reason"],
+            approved_amount=result["approved_amount"],
+            interest_rate=result["interest_rate"]
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in underwriting: {e}")
+        raise HTTPException(status_code=500, detail="Underwriting failed")
+
+
+=======================================================
+app\api\__init__.py
+
+
+=======================================================
+app\core\llm_client.py
+import httpx
+import json
+import logging
+from typing import Dict, Any, Optional
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class HuggingFaceLLMClient:
+    """Centralized HuggingFace LLM API client with structured output support"""
+    
+    def __init__(self):
+        self.api_key = settings.HF_API_KEY
+        self.base_url = settings.HF_API_URL
+        self.timeout = settings.HF_TIMEOUT
+        self.headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+    
+    async def generate_structured(
+        self,
+        prompt: str,
+        model: str,
+        json_schema: Optional[Dict[str, Any]] = None,
+        temperature: float = 0.1,
+        max_tokens: int = 512
+    ) -> Dict[str, Any]:
+        """
+        Generate structured JSON output from LLM
+        
+        Args:
+            prompt: The instruction prompt
+            model: HuggingFace model identifier
+            json_schema: Expected JSON schema for structured output
+            temperature: Sampling temperature (lower = more deterministic)
+            max_tokens: Maximum tokens to generate
+            
+        Returns:
+            Parsed JSON response
+        """
+        try:
+            payload = {
+                "inputs": prompt,
+                "parameters": {
+                    "temperature": temperature,
+                    "max_new_tokens": max_tokens,
+                    "return_full_text": False,
+                    "do_sample": temperature > 0
+                }
+            }
+            
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(
+                    f"{self.base_url}/{model}",
+                    headers=self.headers,
+                    json=payload
+                )
+                response.raise_for_status()
+                result = response.json()
+                
+                if isinstance(result, list) and len(result) > 0:
+                    generated_text = result[0].get("generated_text", "")
+                else:
+                    generated_text = result.get("generated_text", "")
+                
+                # Extract JSON from response
+                parsed_json = self._extract_json(generated_text)
+                
+                # Validate against schema if provided
+                if json_schema and parsed_json:
+                    self._validate_schema(parsed_json, json_schema)
+                
+                return parsed_json
+                
+        except httpx.HTTPStatusError as e:
+            logger.error(f"HTTP error calling HuggingFace API: {e}")
+            raise
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON from LLM response: {e}")
+            return {"error": "Failed to parse structured output"}
+        except Exception as e:
+            logger.error(f"Unexpected error in LLM call: {e}")
+            raise
+    
+    def _extract_json(self, text: str) -> Dict[str, Any]:
+        """Extract JSON object from text response"""
+        text = text.strip()
+        
+        # Try to find JSON block
+        json_start = text.find("{")
+        json_end = text.rfind("}") + 1
+        
+        if json_start != -1 and json_end > json_start:
+            json_text = text[json_start:json_end]
+            try:
+                return json.loads(json_text)
+            except json.JSONDecodeError:
+                pass
+        
+        # Try parsing entire text
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            logger.warning(f"Could not extract JSON from: {text[:100]}")
+            return {}
+    
+    def _validate_schema(self, data: Dict[str, Any], schema: Dict[str, Any]) -> bool:
+        """Basic schema validation"""
+        required_fields = schema.get("required", [])
+        properties = schema.get("properties", {})
+        
+        for field in required_fields:
+            if field not in data:
+                raise ValueError(f"Missing required field: {field}")
+        
+        for field, value in data.items():
+            if field in properties:
+                expected_type = properties[field].get("type")
+                if expected_type == "string" and not isinstance(value, str):
+                    raise ValueError(f"Field {field} should be string")
+                elif expected_type == "number" and not isinstance(value, (int, float)):
+                    raise ValueError(f"Field {field} should be number")
+                elif expected_type == "boolean" and not isinstance(value, bool):
+                    raise ValueError(f"Field {field} should be boolean")
+        
+        return True
+    
+    async def classify(self, text: str, categories: list[str]) -> str:
+        """Classify text into one of the provided categories"""
+        prompt = f"""Classify the following user message into exactly ONE category.
+
+Categories: {', '.join(categories)}
+
+User message: "{text}"
+
+Respond with ONLY a JSON object in this format:
+{{"category": "CATEGORY_NAME"}}
+
+JSON:"""
+        
+        schema = {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string"}
+            },
+            "required": ["category"]
+        }
+        
+        result = await self.generate_structured(
+            prompt=prompt,
+            model=settings.HF_MODEL_CLASSIFICATION,
+            json_schema=schema,
+            temperature=0.1
+        )
+        
+        category = result.get("category", "OUT_OF_SCOPE")
+        if category not in categories:
+            category = "OUT_OF_SCOPE"
+        
+        return category
+    
+    async def extract_slot(self, text: str, slot_name: str, slot_description: str) -> Dict[str, Any]:
+        """Extract specific slot value from user message"""
+        prompt = f"""Extract the {slot_name} from the user's message.
+
+{slot_description}
+
+User message: "{text}"
+
+Respond with ONLY a JSON object in this format:
+{{"value": "extracted_value", "confidence": 0.0-1.0}}
+
+If not found, set value to null and confidence to 0.0.
+
+JSON:"""
+        
+        schema = {
+            "type": "object",
+            "properties": {
+                "value": {"type": ["string", "number", "boolean", "null"]},
+                "confidence": {"type": "number"}
+            },
+            "required": ["value", "confidence"]
+        }
+        
+        result = await self.generate_structured(
+            prompt=prompt,
+            model=settings.HF_MODEL_EXTRACTION,
+            json_schema=schema,
+            temperature=0.1
+        )
+        
+        return result
+    
+    async def rephrase(self, content: str, tone: str = "professional") -> str:
+        """Rephrase content in natural language"""
+        prompt = f"""Rephrase the following content in a {tone} and conversational tone.
+
+Content: {content}
+
+Rephrased response:"""
+        
+        result = await self.generate_structured(
+            prompt=prompt,
+            model=settings.HF_MODEL_GENERATION,
+            temperature=0.3,
+            max_tokens=256
+        )
+        
+        # For rephrasing, we accept plain text or extract 'response' field
+        if isinstance(result, dict) and "response" in result:
+            return result["response"]
+        elif isinstance(result, dict):
+            return content  # Fallback
+        else:
+            return str(result)
+
+
+# Global LLM client instance
+llm_client = HuggingFaceLLMClient()
+
+
+=======================================================
+app\core\session.py
+import json
+import logging
+from typing import Dict, Any, Optional
+from datetime import datetime, timedelta
+from enum import Enum
+import asyncio
+from uuid import uuid4
+
+logger = logging.getLogger(__name__)
+
+
+class ConversationState(str, Enum):
+    """State machine states"""
+    GREETING = "GREETING"
+    CONSENT = "CONSENT"
+    CUSTOMER_ID = "CUSTOMER_ID"
+    AMOUNT = "AMOUNT"
+    NEED_DOCS = "NEED_DOCS"
+    DOC_UPLOAD = "DOC_UPLOAD"
+    OCR_CONFIRM = "OCR_CONFIRM"
+    UNDERWRITING = "UNDERWRITING"
+    DECISION = "DECISION"
+    COMPLETED = "COMPLETED"
+
+
+class SessionData:
+    """Session state container"""
+    
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        self.created_at = datetime.utcnow()
+        self.updated_at = datetime.utcnow()
+        self.current_state = ConversationState.GREETING
+        self.history: list[Dict[str, str]] = []
+        
+        # Slots
+        self.slots: Dict[str, Any] = {
+            "consent": None,
+            "customer_id": None,
+            "loan_amount": None,
+            "documents": {},
+            "ocr_data": {},
+            "underwriting_result": None,
+            "decision": None
+        }
+        
+        # State history for rewind capability
+        self.state_history: list[ConversationState] = [ConversationState.GREETING]
+    
+    def update_slot(self, key: str, value: Any):
+        """Update a slot value"""
+        self.slots[key] = value
+        self.updated_at = datetime.utcnow()
+    
+    def get_slot(self, key: str) -> Any:
+        """Get slot value"""
+        return self.slots.get(key)
+    
+    def add_message(self, role: str, content: str):
+        """Add message to conversation history"""
+        self.history.append({
+            "role": role,
+            "content": content,
+            "timestamp": datetime.utcnow().isoformat()
+        })
+        self.updated_at = datetime.utcnow()
+    
+    def transition_state(self, new_state: ConversationState):
+        """Transition to new state"""
+        if new_state != self.current_state:
+            self.state_history.append(new_state)
+            self.current_state = new_state
+            self.updated_at = datetime.utcnow()
+            logger.info(f"Session {self.session_id} transitioned to {new_state}")
+    
+    def rewind_state(self) -> bool:
+        """Rewind to previous state"""
+        if len(self.state_history) > 1:
+            self.state_history.pop()
+            self.current_state = self.state_history[-1]
+            self.updated_at = datetime.utcnow()
+            logger.info(f"Session {self.session_id} rewound to {self.current_state}")
+            return True
+        return False
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize session to dictionary"""
+        return {
+            "session_id": self.session_id,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+            "current_state": self.current_state.value,
+            "history": self.history,
+            "slots": self.slots,
+            "state_history": [s.value for s in self.state_history]
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SessionData":
+        """Deserialize session from dictionary"""
+        session = cls(data["session_id"])
+        session.created_at = datetime.fromisoformat(data["created_at"])
+        session.updated_at = datetime.fromisoformat(data["updated_at"])
+        session.current_state = ConversationState(data["current_state"])
+        session.history = data["history"]
+        session.slots = data["slots"]
+        session.state_history = [ConversationState(s) for s in data["state_history"]]
+        return session
+
+
+class SessionManager:
+    """In-memory session manager with optional Redis backend"""
+    
+    def __init__(self):
+        self.sessions: Dict[str, SessionData] = {}
+        self.lock = asyncio.Lock()
+    
+    async def create_session(self) -> SessionData:
+        """Create new session"""
+        session_id = str(uuid4())
+        session = SessionData(session_id)
+        
+        async with self.lock:
+            self.sessions[session_id] = session
+        
+        logger.info(f"Created session {session_id}")
+        return session
+    
+    async def get_session(self, session_id: str) -> Optional[SessionData]:
+        """Retrieve session by ID"""
+        async with self.lock:
+            session = self.sessions.get(session_id)
+            if session:
+                # Check expiry
+                if datetime.utcnow() - session.updated_at > timedelta(seconds=3600):
+                    del self.sessions[session_id]
+                    logger.info(f"Session {session_id} expired")
+                    return None
+            return session
+    
+    async def update_session(self, session: SessionData):
+        """Update existing session"""
+        async with self.lock:
+            self.sessions[session.session_id] = session
+    
+    async def delete_session(self, session_id: str):
+        """Delete session"""
+        async with self.lock:
+            if session_id in self.sessions:
+                del self.sessions[session_id]
+                logger.info(f"Deleted session {session_id}")
+    
+    async def cleanup_expired(self):
+        """Remove expired sessions"""
+        async with self.lock:
+            now = datetime.utcnow()
+            expired = [
+                sid for sid, sess in self.sessions.items()
+                if now - sess.updated_at > timedelta(seconds=3600)
+            ]
+            for sid in expired:
+                del self.sessions[sid]
+            if expired:
+                logger.info(f"Cleaned up {len(expired)} expired sessions")
+
+
+# Global session manager
+session_manager = SessionManager()
+
+
+=======================================================
+app\core\__init__.py
+
+
+=======================================================
+app\graph\dialogue_manager.py
+import logging
+from typing import Dict, Any, Optional
+from app.core.session import SessionData, ConversationState
+from app.graph.state_machine import state_machine
+from app.graph.slot_filler import slot_filler
+from app.workers.consent_worker import consent_worker
+from app.workers.customer_id_worker import customer_id_worker
+from app.workers.amount_worker import amount_worker
+from app.workers.document_worker import document_worker
+from app.workers.underwriting_worker import underwriting_worker
+from app.workers.decision_worker import decision_worker
+
+logger = logging.getLogger(__name__)
+
+
+class DialogueManager:
+    """Orchestrates conversation flow and delegates to workers"""
+    
+    async def process_task_action(self, user_message: str, session: SessionData) -> Dict[str, Any]:
+        """
+        Process task-oriented user message
+        
+        Returns:
+            {
+                "response": str,
+                "state_changed": bool,
+                "new_state": str,
+                "slots_updated": dict
+            }
+        """
+        current_state = session.current_state
+        logger.info(f"Processing task action in state: {current_state}")
+        
+        # Check for correction intent
+        correction = await slot_filler.detect_correction(user_message)
+        if correction and state_machine.can_rewind(current_state):
+            session.rewind_state()
+            return {
+                "response": "I understand you want to correct something. Let's go back.",
+                "state_changed": True,
+                "new_state": session.current_state.value,
+                "slots_updated": {}
+            }
+        
+        # Route to appropriate worker based on state
+        if current_state == ConversationState.GREETING:
+            return await self._handle_greeting(user_message, session)
+        
+        elif current_state == ConversationState.CONSENT:
+            return await consent_worker.process(user_message, session)
+        
+        elif current_state == ConversationState.CUSTOMER_ID:
+            return await customer_id_worker.process(user_message, session)
+        
+        elif current_state == ConversationState.AMOUNT:
+            return await amount_worker.process(user_message, session)
+        
+        elif current_state == ConversationState.NEED_DOCS:
+            return await document_worker.process_need_docs(user_message, session)
+        
+        elif current_state == ConversationState.DOC_UPLOAD:
+            return await document_worker.process_upload(user_message, session)
+        
+        elif current_state == ConversationState.OCR_CONFIRM:
+            return await document_worker.process_confirm(user_message, session)
+        
+        elif current_state == ConversationState.UNDERWRITING:
+            return await underwriting_worker.process(user_message, session)
+        
+        elif current_state == ConversationState.DECISION:
+            return await decision_worker.process(user_message, session)
+        
+        elif current_state == ConversationState.COMPLETED:
+            return {
+                "response": "Your loan application has been completed. Is there anything else I can help you with?",
+                "state_changed": False,
+                "new_state": current_state.value,
+                "slots_updated": {}
+            }
+        
+        return {
+            "response": "I'm not sure how to proceed. Could you please clarify?",
+            "state_changed": False,
+            "new_state": current_state.value,
+            "slots_updated": {}
+        }
+    
+    async def _handle_greeting(self, user_message: str, session: SessionData) -> Dict[str, Any]:
+        """Handle initial greeting state"""
+        response = "Hello! Welcome to TIA Personal Loans. I'm here to help you with your loan application. Shall we begin?"
+        
+        next_state = state_machine.get_next_state(
+            session.current_state,
+            "greeting_completed",
+            {}
+        )
+        
+        if next_state:
+            session.transition_state(next_state)
+        
+        return {
+            "response": response,
+            "state_changed": True,
+            "new_state": session.current_state.value,
+            "slots_updated": {}
+        }
+
+
+dialogue_manager = DialogueManager()
+
+
+=======================================================
+app\graph\response_synthesizer.py
+import logging
+from typing import Dict, Any
+from app.core.llm_client import llm_client
+from app.guardrails.output_guardrail import output_guardrail
+
+logger = logging.getLogger(__name__)
+
+
+class ResponseSynthesizer:
+    """Converts structured results to natural language responses"""
+    
+    async def synthesize(self, structured_data: Dict[str, Any], context: Dict[str, Any]) -> str:
+        """
+        Convert structured data to natural language
+        
+        Args:
+            structured_data: Worker output or structured result
+            context: Session context (state, slots, etc.)
+            
+        Returns:
+            Natural language response
+        """
+        # If response is already provided, rephrase for variety
+        if "response" in structured_data:
+            base_response = structured_data["response"]
+            
+            # Check if rephrasing is needed (avoid repetition)
+            if self._should_rephrase(base_response, context):
+                try:
+                    rephrased = await llm_client.rephrase(base_response, tone="professional")
+                    response = rephrased if rephrased else base_response
+                except Exception as e:
+                    logger.error(f"Error rephrasing response: {e}")
+                    response = base_response
+            else:
+                response = base_response
+        else:
+            # Generate response from structured data
+            response = self._generate_from_structured(structured_data, context)
+        
+        # Apply output guardrails
+        validated_response = output_guardrail.validate(
+            response,
+            context={"in_loan_flow": context.get("state") not in ["GREETING", "COMPLETED"]}
+        )
+        
+        return validated_response
+    
+    def _should_rephrase(self, response: str, context: Dict[str, Any]) -> bool:
+        """Determine if response should be rephrased"""
+        # Check history for repetition
+        history = context.get("history", [])
+        recent_responses = [msg["content"] for msg in history[-3:] if msg.get("role") == "assistant"]
+        
+        # If similar response in recent history, rephrase
+        for prev_response in recent_responses:
+            if self._similarity(response, prev_response) > 0.7:
+                return True
+        
+        return False
+    
+    def _similarity(self, text1: str, text2: str) -> float:
+        """Simple similarity check"""
+        words1 = set(text1.lower().split())
+        words2 = set(text2.lower().split())
+        
+        if not words1 or not words2:
+            return 0.0
+        
+        intersection = words1.intersection(words2)
+        union = words1.union(words2)
+        
+        return len(intersection) / len(union)
+    
+    def _generate_from_structured(self, data: Dict[str, Any], context: Dict[str, Any]) -> str:
+        """Generate response from structured data when no response field exists"""
+        # Default fallback
+        state = context.get("state", "UNKNOWN")
+        
+        if "error" in data:
+            return f"I encountered an issue: {data['error']}. Could you please try again?"
+        
+        if state == "DECISION":
+            decision = data.get("decision")
+            if decision == "APPROVED":
+                return "Congratulations! Your loan application has been approved."
+            elif decision == "REJECTED":
+                return "I'm sorry, but your loan application was not approved at this time."
+            else:
+                return "Your application is under review."
+        
+        return "Thank you for the information. Let's continue with your application."
+
+
+response_synthesizer = ResponseSynthesizer()
+
+
+=======================================================
+app\graph\router.py
+import logging
+from enum import Enum
+from app.core.llm_client import llm_client
+
+logger = logging.getLogger(__name__)
+
+
+class IntentType(str, Enum):
+    """User intent classification"""
+    GREETING = "GREETING"
+    KNOWLEDGE_QUERY = "KNOWLEDGE_QUERY"
+    TASK_ACTION = "TASK_ACTION"
+    OUT_OF_SCOPE = "OUT_OF_SCOPE"
+
+
+class SemanticRouter:
+    """Routes user messages to appropriate handlers based on intent"""
+    
+    async def route(self, user_message: str, session_state: str) -> IntentType:
+        """
+        Classify user intent using LLM
+        
+        Args:
+            user_message: User's input text
+            session_state: Current conversation state
+            
+        Returns:
+            Classified intent type
+        """
+        # Quick pattern matching for common cases
+        quick_intent = self._quick_classify(user_message, session_state)
+        if quick_intent:
+            return quick_intent
+        
+        # Use LLM for ambiguous cases
+        categories = [e.value for e in IntentType]
+        
+        try:
+            intent = await llm_client.classify(user_message, categories)
+            logger.info(f"Routed message to intent: {intent}")
+            return IntentType(intent)
+        except Exception as e:
+            logger.error(f"Error in semantic routing: {e}")
+            return IntentType.TASK_ACTION  # Default to task action
+    
+    def _quick_classify(self, message: str, state: str) -> IntentType:
+        """Quick pattern-based classification"""
+        message_lower = message.lower().strip()
+        
+        # Greetings
+        greeting_patterns = ["hello", "hi", "hey", "good morning", "good afternoon", "namaste"]
+        if any(pattern in message_lower for pattern in greeting_patterns) and len(message) < 50:
+            return IntentType.GREETING
+        
+        # Knowledge queries
+        knowledge_patterns = ["what is", "how does", "can you explain", "tell me about", "interest rate", "eligibility", "documents required"]
+        if any(pattern in message_lower for pattern in knowledge_patterns):
+            return IntentType.KNOWLEDGE_QUERY
+        
+        # Out of scope
+        out_of_scope_patterns = ["weather", "joke", "movie", "recipe", "sports", "politics"]
+        if any(pattern in message_lower for pattern in out_of_scope_patterns):
+            return IntentType.OUT_OF_SCOPE
+        
+        # Default to task action if in active flow
+        if state not in ["GREETING", "COMPLETED"]:
+            return IntentType.TASK_ACTION
+        
+        return None
+
+
+semantic_router = SemanticRouter()
+
+
+=======================================================
+app\graph\slot_filler.py
+import logging
+import re
+from typing import Dict, Any, Optional
+from app.core.llm_client import llm_client
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class SlotFiller:
+    """Extracts and validates structured data from user messages"""
+    
+    async def extract_consent(self, user_message: str) -> Optional[bool]:
+        """Extract consent (yes/no) from user message"""
+        message_lower = user_message.lower().strip()
+        
+        # Pattern matching for clear responses
+        yes_patterns = ["yes", "yeah", "yep", "sure", "ok", "okay", "i agree", "i consent", "proceed"]
+        no_patterns = ["no", "nope", "nah", "don't", "do not", "disagree", "decline"]
+        
+        if any(pattern in message_lower for pattern in yes_patterns):
+            return True
+        elif any(pattern in message_lower for pattern in no_patterns):
+            return False
+        
+        # Use LLM for ambiguous cases
+        try:
+            result = await llm_client.extract_slot(
+                text=user_message,
+                slot_name="consent",
+                slot_description="Extract whether user agrees/consents (true) or disagrees (false)."
+            )
+            
+            value = result.get("value")
+            confidence = result.get("confidence", 0.0)
+            
+            if confidence > 0.7 and isinstance(value, bool):
+                return value
+        except Exception as e:
+            logger.error(f"Error extracting consent: {e}")
+        
+        return None
+    
+    async def extract_customer_id(self, user_message: str) -> Optional[str]:
+        """Extract customer ID from user message"""
+        # Pattern: CUST followed by 6-10 digits
+        pattern = r'\b(CUST\d{6,10}|\d{6,10})\b'
+        match = re.search(pattern, user_message, re.IGNORECASE)
+        
+        if match:
+            customer_id = match.group(1).upper()
+            if not customer_id.startswith("CUST"):
+                customer_id = f"CUST{customer_id}"
+            return customer_id
+        
+        # Use LLM for extraction
+        try:
+            result = await llm_client.extract_slot(
+                text=user_message,
+                slot_name="customer_id",
+                slot_description="Extract customer ID (format: CUST followed by digits, or just digits)."
+            )
+            
+            value = result.get("value")
+            confidence = result.get("confidence", 0.0)
+            
+            if confidence > 0.6 and value:
+                customer_id = str(value).upper()
+                if not customer_id.startswith("CUST") and customer_id.isdigit():
+                    customer_id = f"CUST{customer_id}"
+                return customer_id
+        except Exception as e:
+            logger.error(f"Error extracting customer_id: {e}")
+        
+        return None
+    
+    async def extract_loan_amount(self, user_message: str) -> Optional[float]:
+        """Extract loan amount from user message"""
+        # Pattern for amounts with various formats
+        patterns = [
+            r'₹\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:lakh|lac|l)?',
+            r'(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:lakh|lac|l)',
+            r'₹\s*(\d+(?:,\d+)*(?:\.\d+)?)',
+            r'(\d+(?:,\d+)*(?:\.\d+)?)\s*rupees'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, user_message, re.IGNORECASE)
+            if match:
+                amount_str = match.group(1).replace(',', '')
+                try:
+                    amount = float(amount_str)
+                    
+                    # Check if it's in lakhs
+                    if 'lakh' in user_message.lower() or 'lac' in user_message.lower():
+                        amount = amount * 100000
+                    
+                    # Validate range
+                    if settings.MIN_LOAN_AMOUNT <= amount <= settings.MAX_LOAN_AMOUNT:
+                        return amount
+                except ValueError:
+                    pass
+        
+        # Use LLM for extraction
+        try:
+            result = await llm_client.extract_slot(
+                text=user_message,
+                slot_name="loan_amount",
+                slot_description=f"Extract loan amount in rupees (numeric value). Convert lakhs to rupees. Range: {settings.MIN_LOAN_AMOUNT} to {settings.MAX_LOAN_AMOUNT}."
+            )
+            
+            value = result.get("value")
+            confidence = result.get("confidence", 0.0)
+            
+            if confidence > 0.6 and value:
+                try:
+                    amount = float(value)
+                    if settings.MIN_LOAN_AMOUNT <= amount <= settings.MAX_LOAN_AMOUNT:
+                        return amount
+                except (ValueError, TypeError):
+                    pass
+        except Exception as e:
+            logger.error(f"Error extracting loan_amount: {e}")
+        
+        return None
+    
+    async def detect_correction(self, user_message: str) -> Optional[str]:
+        """Detect if user wants to correct previous information"""
+        correction_patterns = [
+            "actually", "wait", "no", "correction", "change", "wrong",
+            "meant to say", "i mean", "not", "instead"
+        ]
+        
+        message_lower = user_message.lower()
+        if any(pattern in message_lower for pattern in correction_patterns):
+            return "CORRECTION_DETECTED"
+        
+        return None
+
+
+slot_filler = SlotFiller()
+
+
+=======================================================
+app\graph\state_machine.py
+import logging
+from typing import Optional, Dict, Any
+from app.core.session import ConversationState, SessionData
+
+logger = logging.getLogger(__name__)
+
+
+class StateMachine:
+    """Deterministic state machine controller"""
+    
+    def __init__(self):
+        # Define valid state transitions
+        self.transitions = {
+            ConversationState.GREETING: [ConversationState.CONSENT],
+            ConversationState.CONSENT: [ConversationState.CUSTOMER_ID, ConversationState.GREETING],
+            ConversationState.CUSTOMER_ID: [ConversationState.AMOUNT, ConversationState.CONSENT],
+            ConversationState.AMOUNT: [ConversationState.NEED_DOCS, ConversationState.CUSTOMER_ID],
+            ConversationState.NEED_DOCS: [ConversationState.DOC_UPLOAD, ConversationState.AMOUNT],
+            ConversationState.DOC_UPLOAD: [ConversationState.OCR_CONFIRM, ConversationState.DOC_UPLOAD],
+            ConversationState.OCR_CONFIRM: [ConversationState.UNDERWRITING, ConversationState.DOC_UPLOAD],
+            ConversationState.UNDERWRITING: [ConversationState.DECISION],
+            ConversationState.DECISION: [ConversationState.COMPLETED],
+            ConversationState.COMPLETED: []
+        }
+    
+    def get_next_state(self, current_state: ConversationState, action: str, context: Dict[str, Any]) -> Optional[ConversationState]:
+        """
+        Determine next state based on current state and action
+        
+        Args:
+            current_state: Current conversation state
+            action: Action taken (e.g., "consent_given", "amount_provided")
+            context: Additional context (slots, etc.)
+            
+        Returns:
+            Next state or None if invalid transition
+        """
+        logger.info(f"State transition request: {current_state} -> {action}")
+        
+        if current_state == ConversationState.GREETING:
+            if action == "greeting_completed":
+                return ConversationState.CONSENT
+        
+        elif current_state == ConversationState.CONSENT:
+            if action == "consent_given":
+                return ConversationState.CUSTOMER_ID
+            elif action == "consent_denied":
+                return ConversationState.GREETING
+        
+        elif current_state == ConversationState.CUSTOMER_ID:
+            if action == "customer_id_provided":
+                return ConversationState.AMOUNT
+            elif action == "correction":
+                return ConversationState.CONSENT
+        
+        elif current_state == ConversationState.AMOUNT:
+            if action == "amount_provided":
+                return ConversationState.NEED_DOCS
+            elif action == "correction":
+                return ConversationState.CUSTOMER_ID
+        
+        elif current_state == ConversationState.NEED_DOCS:
+            if action == "docs_acknowledged":
+                return ConversationState.DOC_UPLOAD
+            elif action == "correction":
+                return ConversationState.AMOUNT
+        
+        elif current_state == ConversationState.DOC_UPLOAD:
+            if action == "docs_uploaded":
+                return ConversationState.OCR_CONFIRM
+            elif action == "retry_upload":
+                return ConversationState.DOC_UPLOAD
+        
+        elif current_state == ConversationState.OCR_CONFIRM:
+            if action == "ocr_confirmed":
+                return ConversationState.UNDERWRITING
+            elif action == "ocr_rejected":
+                return ConversationState.DOC_UPLOAD
+        
+        elif current_state == ConversationState.UNDERWRITING:
+            if action == "underwriting_completed":
+                return ConversationState.DECISION
+        
+        elif current_state == ConversationState.DECISION:
+            if action == "decision_delivered":
+                return ConversationState.COMPLETED
+        
+        logger.warning(f"Invalid transition: {current_state} -> {action}")
+        return None
+    
+    def can_rewind(self, current_state: ConversationState) -> bool:
+        """Check if state can be rewound"""
+        non_rewindable = [
+            ConversationState.UNDERWRITING,
+            ConversationState.DECISION,
+            ConversationState.COMPLETED
+        ]
+        return current_state not in non_rewindable
+    
+    def validate_transition(self, from_state: ConversationState, to_state: ConversationState) -> bool:
+        """Validate if transition is allowed"""
+        allowed_transitions = self.transitions.get(from_state, [])
+        return to_state in allowed_transitions
+
+
+state_machine = StateMachine()
+
+
+=======================================================
+app\graph\__init__.py
+
+
+=======================================================
+app\guardrails\input_guardrail.py
+import re
+import logging
+from typing import Tuple
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class InputGuardrail:
+    """Input validation and sanitization"""
+    
+    def __init__(self):
+        self.max_length = settings.INPUT_MAX_LENGTH
+        self.offensive_keywords = settings.OFFENSIVE_KEYWORDS
+    
+    def validate(self, user_input: str) -> Tuple[bool, str]:
+        """
+        Validate user input
+        
+        Returns:
+            (is_valid, sanitized_input or error_message)
+        """
+        if not user_input or not user_input.strip():
+            return False, "Empty input"
+        
+        # Length check
+        if len(user_input) > self.max_length:
+            return False, f"Input too long (max {self.max_length} characters)"
+        
+        # Check for injection attempts
+        if self._contains_injection_patterns(user_input):
+            logger.warning(f"Potential injection attempt detected: {user_input[:50]}")
+            return False, "Invalid input detected"
+        
+        # Check offensive keywords
+        if self._contains_offensive_content(user_input):
+            logger.warning(f"Offensive content detected: {user_input[:50]}")
+            return False, "Please keep the conversation professional"
+        
+        # Sanitize
+        sanitized = self._sanitize(user_input)
+        
+        return True, sanitized
+    
+    def _contains_injection_patterns(self, text: str) -> bool:
+        """Check for common injection patterns"""
+        patterns = [
+            r"<script",
+            r"javascript:",
+            r"onerror=",
+            r"onclick=",
+            r"\bUNION\b.*\bSELECT\b",
+            r"\bDROP\b.*\bTABLE\b",
+            r"--.*$",
+            r"/\*.*\*/"
+        ]
+        
+        text_lower = text.lower()
+        for pattern in patterns:
+            if re.search(pattern, text_lower, re.IGNORECASE):
+                return True
+        return False
+    
+    def _contains_offensive_content(self, text: str) -> bool:
+        """Check for offensive keywords"""
+        text_lower = text.lower()
+        for keyword in self.offensive_keywords:
+            if keyword.lower() in text_lower:
+                return True
+        return False
+    
+    def _sanitize(self, text: str) -> str:
+        """Sanitize input text"""
+        # Remove excessive whitespace
+        text = " ".join(text.split())
+        
+        # Remove control characters
+        text = "".join(char for char in text if ord(char) >= 32 or char in "\n\t")
+        
+        return text.strip()
+
+
+input_guardrail = InputGuardrail()
+
+
+=======================================================
+app\guardrails\output_guardrail.py
+import logging
+from typing import str
+
+logger = logging.getLogger(__name__)
+
+
+class OutputGuardrail:
+    """Output validation and safety checks"""
+    
+    def validate(self, response: str, context: dict = None) -> str:
+        """
+        Validate and potentially modify output response
+        
+        Args:
+            response: Generated response text
+            context: Additional context for validation
+            
+        Returns:
+            Validated response
+        """
+        if not response or not response.strip():
+            return "I apologize, but I couldn't generate a proper response. Could you please rephrase your question?"
+        
+        # Ensure relevance
+        if self._is_off_topic(response, context):
+            logger.warning("Off-topic response detected")
+            return "I'm here to help with your personal loan application. Could you please ask a loan-related question?"
+        
+        # Ensure politeness
+        response = self._ensure_politeness(response)
+        
+        # Remove potential hallucinations
+        response = self._remove_hallucinations(response)
+        
+        return response.strip()
+    
+    def _is_off_topic(self, response: str, context: dict) -> bool:
+        """Check if response is off-topic"""
+        # Check for loan-related keywords
+        loan_keywords = ["loan", "amount", "interest", "document", "approval", "credit", "customer"]
+        response_lower = response.lower()
+        
+        # If context indicates we're in a loan flow, response should be relevant
+        if context and context.get("in_loan_flow"):
+            has_keyword = any(keyword in response_lower for keyword in loan_keywords)
+            if not has_keyword and len(response) > 50:
+                return True
+        
+        return False
+    
+    def _ensure_politeness(self, response: str) -> str:
+        """Ensure response maintains professional tone"""
+        # Replace harsh phrases
+        replacements = {
+            "you must": "please",
+            "you should": "I recommend you",
+            "wrong": "incorrect",
+            "bad": "not optimal"
+        }
+        
+        response_lower = response.lower()
+        for harsh, polite in replacements.items():
+            if harsh in response_lower:
+                response = response.replace(harsh, polite)
+        
+        return response
+    
+    def _remove_hallucinations(self, response: str) -> str:
+        """Remove potential hallucinated content"""
+        # Remove claims about capabilities we don't have
+        hallucination_phrases = [
+            "I can see your screen",
+            "I have access to your account",
+            "I checked your credit score",
+            "I approved your loan"
+        ]
+        
+        for phrase in hallucination_phrases:
+            if phrase.lower() in response.lower():
+                logger.warning(f"Potential hallucination detected: {phrase}")
+                response = response.replace(phrase, "I can help you with")
+        
+        return response
+
+
+output_guardrail = OutputGuardrail()
+
+
+=======================================================
+app\guardrails\__init__.py
+
+
+=======================================================
+app\tools\pdf_generator.py
+import logging
+from datetime import datetime
+from typing import Dict, Any
+from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib import colors
+import os
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class LoanDocumentGenerator:
+    """Generate professional loan approval/rejection documents"""
+    
+    def __init__(self):
+        self.output_dir = settings.OUTPUT_PDF_DIR
+        self.styles = getSampleStyleSheet()
+        self._setup_custom_styles()
+    
+    def _setup_custom_styles(self):
+        """Setup custom paragraph styles"""
+        # Custom Title
+        if 'CustomTitle' not in self.styles:
+            self.styles.add(ParagraphStyle(
+                name='CustomTitle',
+                parent=self.styles['Heading1'],
+                fontSize=24,
+                textColor=colors.HexColor('#1a5490'),
+                spaceAfter=30,
+                alignment=TA_CENTER,
+                fontName='Helvetica-Bold'
+            ))
+        
+        # Section Header
+        if 'SectionHeader' not in self.styles:
+            self.styles.add(ParagraphStyle(
+                name='SectionHeader',
+                parent=self.styles['Heading2'],
+                fontSize=14,
+                textColor=colors.HexColor('#2c5aa0'),
+                spaceAfter=12,
+                spaceBefore=12,
+                fontName='Helvetica-Bold'
+            ))
+        
+        # Custom Body Text
+        if 'CustomBody' not in self.styles:
+            self.styles.add(ParagraphStyle(
+                name='CustomBody',
+                parent=self.styles['Normal'],
+                fontSize=11,
+                spaceAfter=8,
+                alignment=TA_LEFT
+            ))
+        
+        # Footer Text
+        if 'FooterText' not in self.styles:
+            self.styles.add(ParagraphStyle(
+                name='FooterText',
+                parent=self.styles['Normal'],
+                fontSize=9,
+                textColor=colors.grey,
+                alignment=TA_CENTER
+            ))
+    
+    def generate_approval_letter(
+        self,
+        session_data: Dict[str, Any],
+        underwriting_result: Dict[str, Any]
+    ) -> str:
+        """
+        Generate loan approval letter PDF
+        
+        Returns:
+            Path to generated PDF file
+        """
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            customer_id = session_data.get("customer_id", "UNKNOWN")
+            filename = f"loan_approval_{customer_id}_{timestamp}.pdf"
+            filepath = os.path.join(self.output_dir, filename)
+            
+            # Create PDF document
+            doc = SimpleDocTemplate(
+                filepath,
+                pagesize=letter,
+                rightMargin=0.75*inch,
+                leftMargin=0.75*inch,
+                topMargin=1*inch,
+                bottomMargin=0.75*inch
+            )
+            
+            story = []
+            
+            # Company Header
+            story.append(Paragraph(settings.COMPANY_NAME, self.styles['CustomTitle']))
+            story.append(Paragraph(
+                f"{settings.COMPANY_ADDRESS}<br/>"
+                f"Phone: {settings.COMPANY_PHONE} | Email: {settings.COMPANY_EMAIL}",
+                self.styles['FooterText']
+            ))
+            story.append(Spacer(1, 0.3*inch))
+            
+            # Document Title
+            story.append(Paragraph("LOAN APPROVAL LETTER", self.styles['CustomTitle']))
+            story.append(Spacer(1, 0.2*inch))
+            
+            # Reference Details
+            ref_date = datetime.now().strftime("%B %d, %Y")
+            ref_number = f"TIA/LA/{customer_id}/{timestamp}"
+            
+            story.append(Paragraph(f"<b>Date:</b> {ref_date}", self.styles['CustomBody']))
+            story.append(Paragraph(f"<b>Reference No:</b> {ref_number}", self.styles['CustomBody']))
+            story.append(Paragraph(f"<b>Customer ID:</b> {customer_id}", self.styles['CustomBody']))
+            story.append(Spacer(1, 0.3*inch))
+            
+            # Greeting
+            story.append(Paragraph("Dear Valued Customer,", self.styles['CustomBody']))
+            story.append(Spacer(1, 0.1*inch))
+            
+            # Approval Message
+            approval_text = f"""
+            We are pleased to inform you that your personal loan application has been 
+            <b>APPROVED</b>. After careful review of your application and supporting documents, 
+            we are confident in extending the following loan facility to you.
+            """
+            story.append(Paragraph(approval_text, self.styles['CustomBody']))
+            story.append(Spacer(1, 0.2*inch))
+            
+            # Loan Details Table
+            story.append(Paragraph("LOAN DETAILS", self.styles['SectionHeader']))
+            
+            loan_amount = underwriting_result.get("approved_amount", 0)
+            interest_rate = underwriting_result.get("interest_rate", 0)
+            tenure_months = 36  # Default tenure
+            monthly_emi = self._calculate_emi(loan_amount, interest_rate, tenure_months)
+            
+            loan_details_data = [
+                ["Particulars", "Details"],
+                ["Approved Loan Amount", f"₹ {loan_amount:,.2f}"],
+                ["Interest Rate (per annum)", f"{interest_rate}%"],
+                ["Loan Tenure", f"{tenure_months} months"],
+                ["Estimated Monthly EMI", f"₹ {monthly_emi:,.2f}"],
+                ["Processing Fee", f"₹ {loan_amount * 0.02:,.2f} (2%)"],
+                ["Total Amount Payable", f"₹ {monthly_emi * tenure_months:,.2f}"]
+            ]
+            
+            loan_table = Table(loan_details_data, colWidths=[3*inch, 3*inch])
+            loan_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a5490')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 12),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                ('FONTSIZE', (0, 1), (-1, -1), 10),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey])
+            ]))
+            
+            story.append(loan_table)
+            story.append(Spacer(1, 0.3*inch))
+            
+            # Terms and Conditions
+            story.append(Paragraph("TERMS & CONDITIONS", self.styles['SectionHeader']))
+            terms = [
+                "The loan amount will be disbursed within 2-3 business days after document verification.",
+                "EMI payments must be made on or before the 5th of each month.",
+                "Late payment charges of 2% per month will apply on overdue amounts.",
+                "The loan is subject to final verification of documents and credit check.",
+                "Please review the detailed loan agreement document for complete terms.",
+            ]
+            
+            for i, term in enumerate(terms, 1):
+                story.append(Paragraph(f"{i}. {term}", self.styles['CustomBody']))
+            
+            story.append(Spacer(1, 0.3*inch))
+            
+            # Next Steps
+            story.append(Paragraph("NEXT STEPS", self.styles['SectionHeader']))
+            next_steps_text = """
+            Our loan specialist will contact you within 24 hours to complete the documentation 
+            process. Please keep the following documents ready:
+            <br/><br/>
+            • Original identity proof (Aadhaar/PAN)<br/>
+            • Address proof<br/>
+            • Last 6 months bank statements<br/>
+            • Recent salary slips<br/>
+            """
+            story.append(Paragraph(next_steps_text, self.styles['CustomBody']))
+            story.append(Spacer(1, 0.3*inch))
+            
+            # Closing
+            closing_text = """
+            We appreciate your trust in TIA Personal Loans. Should you have any questions, 
+            please feel free to contact us at the above-mentioned contact details.
+            """
+            story.append(Paragraph(closing_text, self.styles['CustomBody']))
+            story.append(Spacer(1, 0.2*inch))
+            
+            story.append(Paragraph("Warm Regards,<br/><br/>", self.styles['CustomBody']))
+            story.append(Paragraph("<b>TIA Personal Loans</b><br/>Loan Processing Team", self.styles['CustomBody']))
+            
+            # Footer
+            story.append(Spacer(1, 0.5*inch))
+            footer_text = f"""
+            <i>This is a system-generated document. For queries, contact {settings.COMPANY_EMAIL}</i>
+            """
+            story.append(Paragraph(footer_text, self.styles['FooterText']))
+            
+            # Build PDF
+            doc.build(story)
+            
+            logger.info(f"Generated approval letter: {filepath}")
+            return filepath
+        
+        except Exception as e:
+            logger.error(f"Error generating approval letter: {e}", exc_info=True)
+            raise
+    
+    def generate_rejection_letter(
+        self,
+        session_data: Dict[str, Any],
+        underwriting_result: Dict[str, Any]
+    ) -> str:
+        """
+        Generate loan rejection letter PDF
+        
+        Returns:
+            Path to generated PDF file
+        """
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            customer_id = session_data.get("customer_id", "UNKNOWN")
+            filename = f"loan_decision_{customer_id}_{timestamp}.pdf"
+            filepath = os.path.join(self.output_dir, filename)
+            
+            doc = SimpleDocTemplate(
+                filepath,
+                pagesize=letter,
+                rightMargin=0.75*inch,
+                leftMargin=0.75*inch,
+                topMargin=1*inch,
+                bottomMargin=0.75*inch
+            )
+            
+            story = []
+            
+            # Company Header
+            story.append(Paragraph(settings.COMPANY_NAME, self.styles['CustomTitle']))
+            story.append(Paragraph(
+                f"{settings.COMPANY_ADDRESS}<br/>"
+                f"Phone: {settings.COMPANY_PHONE} | Email: {settings.COMPANY_EMAIL}",
+                self.styles['FooterText']
+            ))
+            story.append(Spacer(1, 0.3*inch))
+            
+            # Document Title
+            story.append(Paragraph("LOAN APPLICATION STATUS", self.styles['CustomTitle']))
+            story.append(Spacer(1, 0.2*inch))
+            
+            # Reference Details
+            ref_date = datetime.now().strftime("%B %d, %Y")
+            ref_number = f"TIA/LS/{customer_id}/{timestamp}"
+            
+            story.append(Paragraph(f"<b>Date:</b> {ref_date}", self.styles['CustomBody']))
+            story.append(Paragraph(f"<b>Reference No:</b> {ref_number}", self.styles['CustomBody']))
+            story.append(Paragraph(f"<b>Customer ID:</b> {customer_id}", self.styles['CustomBody']))
+            story.append(Spacer(1, 0.3*inch))
+            
+            # Greeting
+            story.append(Paragraph("Dear Valued Customer,", self.styles['CustomBody']))
+            story.append(Spacer(1, 0.1*inch))
+            
+            # Status Message
+            reason = underwriting_result.get("reason", "eligibility criteria not met")
+            status_text = f"""
+            Thank you for applying for a personal loan with {settings.COMPANY_NAME}. 
+            After careful evaluation of your application, we regret to inform you that 
+            we are unable to approve your loan request at this time.
+            <br/><br/>
+            <b>Reason:</b> {reason}
+            """
+            story.append(Paragraph(status_text, self.styles['CustomBody']))
+            story.append(Spacer(1, 0.3*inch))
+            
+            # Recommendations
+            story.append(Paragraph("RECOMMENDATIONS", self.styles['SectionHeader']))
+            recommendations = [
+                "Improve your credit score by ensuring timely payment of existing loans/credit cards.",
+                "Reduce existing debt obligations to improve debt-to-income ratio.",
+                "Maintain stable employment and income documentation.",
+                "Consider applying for a lower loan amount that aligns with your current income.",
+                "You may reapply after 3 months with updated documentation.",
+            ]
+            
+            for i, rec in enumerate(recommendations, 1):
+                story.append(Paragraph(f"{i}. {rec}", self.styles['CustomBody']))
+            
+            story.append(Spacer(1, 0.3*inch))
+            
+            # Alternative Options
+            story.append(Paragraph("ALTERNATIVE OPTIONS", self.styles['SectionHeader']))
+            alternatives_text = """
+            We encourage you to explore our other financial products that might be more 
+            suitable for your current profile:
+            <br/><br/>
+            • Secured Loans (with collateral)<br/>
+            • Credit Builder Program<br/>
+            • Pre-approved Credit Cards<br/>
+            """
+            story.append(Paragraph(alternatives_text, self.styles['CustomBody']))
+            story.append(Spacer(1, 0.3*inch))
+            
+            # Closing
+            closing_text = """
+            We value your interest in our services. For personalized guidance or to discuss 
+            alternative options, please contact our customer support team.
+            """
+            story.append(Paragraph(closing_text, self.styles['CustomBody']))
+            story.append(Spacer(1, 0.2*inch))
+            
+            story.append(Paragraph("Warm Regards,<br/><br/>", self.styles['CustomBody']))
+            story.append(Paragraph("<b>TIA Personal Loans</b><br/>Credit Assessment Team", self.styles['CustomBody']))
+            
+            # Footer
+            story.append(Spacer(1, 0.5*inch))
+            footer_text = f"""
+            <i>This is a system-generated document. For queries, contact {settings.COMPANY_EMAIL}</i>
+            """
+            story.append(Paragraph(footer_text, self.styles['FooterText']))
+            
+            # Build PDF
+            doc.build(story)
+            
+            logger.info(f"Generated decision letter: {filepath}")
+            return filepath
+        
+        except Exception as e:
+            logger.error(f"Error generating rejection letter: {e}", exc_info=True)
+            raise
+    
+    def _calculate_emi(self, principal: float, annual_rate: float, tenure_months: int) -> float:
+        """Calculate EMI using reducing balance method"""
+        monthly_rate = annual_rate / (12 * 100)
+        
+        if monthly_rate == 0:
+            return principal / tenure_months
+        
+        emi = principal * monthly_rate * (
+            (1 + monthly_rate) ** tenure_months
+        ) / (
+            ((1 + monthly_rate) ** tenure_months) - 1
+        )
+        
+        return round(emi, 2)
+
+
+# Global instance
+pdf_generator = LoanDocumentGenerator()
+
+
+=======================================================
+app\tools\__init__.py
+
+
+=======================================================
+app\tools\document_ocr\extractors.py
+
+
+=======================================================
+app\tools\document_ocr\ocr_engine.py
+import logging
+import pytesseract
+from PIL import Image
+from io import BytesIO
+from typing import Dict, Any, Optional
+from pdfminer.high_level import extract_text as pdf_extract_text
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class OCREngine:
+    """OCR processing engine using Tesseract"""
+    
+    def __init__(self):
+        if settings.TESSERACT_CMD:
+            pytesseract.pytesseract.tesseract_cmd = settings.TESSERACT_CMD
+        self.confidence_threshold = settings.OCR_CONFIDENCE_THRESHOLD
+    
+    async def process_image(self, image_bytes: bytes, doc_type: str) -> Dict[str, Any]:
+        """
+        Process image and extract text with confidence scores
+        
+        Args:
+            image_bytes: Image file bytes
+            doc_type: Type of document (salary_slip, pan_card, aadhaar)
+            
+        Returns:
+            {
+                "text": str,
+                "confidence": float,
+                "extracted_data": dict,
+                "status": str
+            }
+        """
+        try:
+            # Open image
+            image = Image.open(BytesIO(image_bytes))
+            
+            # Perform OCR with detailed output
+            ocr_data = pytesseract.image_to_data(
+                image,
+                output_type=pytesseract.Output.DICT,
+                config='--psm 6'  # Assume uniform block of text
+            )
+            
+            # Calculate average confidence
+            confidences = [
+                int(conf) for conf in ocr_data['conf']
+                if conf != '-1'
+            ]
+            
+            if not confidences:
+                return {
+                    "text": "",
+                    "confidence": 0.0,
+                    "extracted_data": {},
+                    "status": "NO_TEXT_DETECTED"
+                }
+            
+            avg_confidence = sum(confidences) / len(confidences) / 100.0
+            
+            # Extract full text
+            full_text = pytesseract.image_to_string(image)
+            
+            # Extract structured data based on document type
+            extracted_data = self._extract_structured_data(full_text, doc_type)
+            
+            # Determine status
+            if avg_confidence < self.confidence_threshold:
+                status = "LOW_CONFIDENCE"
+            else:
+                status = "SUCCESS"
+            
+            return {
+                "text": full_text,
+                "confidence": avg_confidence,
+                "extracted_data": extracted_data,
+                "status": status
+            }
+        
+        except Exception as e:
+            logger.error(f"OCR processing error: {e}")
+            return {
+                "text": "",
+                "confidence": 0.0,
+                "extracted_data": {},
+                "status": "ERROR",
+                "error": str(e)
+            }
+    
+    async def process_pdf(self, pdf_bytes: bytes, doc_type: str) -> Dict[str, Any]:
+        """Process PDF document"""
+        try:
+            # Extract text from PDF
+            text = pdf_extract_text(BytesIO(pdf_bytes))
+            
+            # For PDF, we assume high confidence if text is extracted
+            confidence = 0.9 if text.strip() else 0.0
+            
+            # Extract structured data
+            extracted_data = self._extract_structured_data(text, doc_type)
+            
+            return {
+                "text": text,
+                "confidence": confidence,
+                "extracted_data": extracted_data,
+                "status": "SUCCESS" if confidence > self.confidence_threshold else "LOW_CONFIDENCE"
+            }
+        
+        except Exception as e:
+            logger.error(f"PDF processing error: {e}")
+            return {
+                "text": "",
+                "confidence": 0.0,
+                "extracted_data": {},
+                "status": "ERROR",
+                "error": str(e)
+            }
+    
+    def _extract_structured_data(self, text: str, doc_type: str) -> Dict[str, Any]:
+        """Extract structured data based on document type"""
+        import re
+        
+        data = {}
+        
+        if doc_type == "salary_slip":
+            # Extract salary information
+            salary_patterns = [
+                r'(?:gross|net|basic)\s*(?:salary|pay)?\s*:?\s*₹?\s*([\d,]+)',
+                r'₹\s*([\d,]+)',
+            ]
+            for pattern in salary_patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    data["monthly_salary"] = match.group(1).replace(',', '')
+                    break
+        
+        elif doc_type == "pan_card":
+            # Extract PAN number
+            pan_pattern = r'\b([A-Z]{5}\d{4}[A-Z])\b'
+            match = re.search(pan_pattern, text)
+            if match:
+                data["pan_number"] = match.group(1)
+        
+        elif doc_type == "aadhaar":
+            # Extract Aadhaar number
+            aadhaar_patterns = [
+                r'\b(\d{4}[\s-]?\d{4}[\s-]?\d{4})\b',
+                r'\b(\d{12})\b'
+            ]
+            for pattern in aadhaar_patterns:
+                match = re.search(pattern, text)
+                if match:
+                    data["aadhaar_number"] = match.group(1)
+                    break
+        
+        return data
+
+
+ocr_engine = OCREngine()
+
+
+=======================================================
+app\tools\document_ocr\__init__.py
+
+
+=======================================================
+app\tools\rag\rag_engine.py
+import logging
+from typing import List, Dict, Any
+from sentence_transformers import SentenceTransformer
+import numpy as np
+from app.tools.rag.vector_store import vector_store
+
+logger = logging.getLogger(__name__)
+
+
+class RAGEngine:
+    """Retrieval-Augmented Generation for knowledge queries"""
+    
+    def __init__(self):
+        self.embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+        self.initialized = False
+    
+    async def initialize(self):
+        """Initialize RAG with policy documents"""
+        if not self.initialized:
+            # Add sample policy documents
+            documents = [
+                {
+                    "content": "Personal loan eligibility: Applicants must be between 21-60 years old with minimum monthly income of ₹25,000. Credit score should be above 650.",
+                    "metadata": {"category": "eligibility"}
+                },
+                {
+                    "content": "Interest rates range from 10.5% to 18% per annum depending on credit profile and loan amount.",
+                    "metadata": {"category": "interest_rates"}
+                },
+                {
+                    "content": "Required documents include: salary slips (last 3 months), PAN card, Aadhaar card, and bank statements (last 6 months).",
+                    "metadata": {"category": "documents"}
+                },
+                {
+                    "content": "Loan amount ranges from ₹50,000 to ₹50,00,000. Repayment tenure options: 12 to 60 months.",
+                    "metadata": {"category": "loan_details"}
+                },
+                {
+                    "content": "Processing time is typically 2-3 business days after document verification. Instant approvals available for pre-qualified customers.",
+                    "metadata": {"category": "processing"}
+                }
+            ]
+            
+            for doc in documents:
+                await vector_store.add_document(doc["content"], doc["metadata"])
+            
+            self.initialized = True
+            logger.info("RAG engine initialized with policy documents")
+    
+    async def query(self, question: str, top_k: int = 3) -> Dict[str, Any]:
+        """
+        Query knowledge base and generate answer
+        
+        Args:
+            question: User's question
+            top_k: Number of relevant documents to retrieve
+            
+        Returns:
+            {
+                "answer": str,
+                "sources": list,
+                "confidence": float
+            }
+        """
+        if not self.initialized:
+            await self.initialize()
+        
+        # Retrieve relevant documents
+        results = await vector_store.search(question, top_k=top_k)
+        
+        if not results:
+            return {
+                "answer": "I don't have specific information about that. Please contact our support team for detailed assistance.",
+                "sources": [],
+                "confidence": 0.0
+            }
+        
+        # Construct answer from retrieved documents
+        context = "\n\n".join([r["content"] for r in results])
+        
+        # For MVP, we use simple retrieval without generation
+        # In production, you'd pass context to LLM for answer generation
+        answer = results[0]["content"]
+        
+        return {
+            "answer": answer,
+            "sources": [r["metadata"] for r in results],
+            "confidence": results[0]["score"]
+        }
+
+
+rag_engine = RAGEngine()
+
+
+=======================================================
+app\tools\rag\vector_store.py
+import logging
+from typing import List, Dict, Any
+import numpy as np
+from sentence_transformers import SentenceTransformer
+
+logger = logging.getLogger(__name__)
+
+
+class VectorStore:
+    """Simple in-memory vector store for document retrieval"""
+    
+    def __init__(self):
+        self.embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+        self.documents: List[Dict[str, Any]] = []
+        self.embeddings: List[np.ndarray] = []
+    
+    async def add_document(self, content: str, metadata: Dict[str, Any] = None):
+        """Add document to vector store"""
+        embedding = self.embedding_model.encode(content)
+        
+        self.documents.append({
+            "content": content,
+            "metadata": metadata or {}
+        })
+        self.embeddings.append(embedding)
+        
+        logger.info(f"Added document to vector store: {content[:50]}...")
+    
+    async def search(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
+        """Search for relevant documents"""
+        if not self.documents:
+            return []
+        
+        # Encode query
+        query_embedding = self.embedding_model.encode(query)
+        
+        # Calculate cosine similarity
+        similarities = []
+        for doc_embedding in self.embeddings:
+            similarity = self._cosine_similarity(query_embedding, doc_embedding)
+            similarities.append(similarity)
+        
+        # Get top-k results
+        top_indices = np.argsort(similarities)[-top_k:][::-1]
+        
+        results = []
+        for idx in top_indices:
+            results.append({
+                "content": self.documents[idx]["content"],
+                "metadata": self.documents[idx]["metadata"],
+                "score": float(similarities[idx])
+            })
+        
+        return results
+    
+    def _cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
+        """Calculate cosine similarity between two vectors"""
+        dot_product = np.dot(vec1, vec2)
+        norm1 = np.linalg.norm(vec1)
+        norm2 = np.linalg.norm(vec2)
+        
+        if norm1 == 0 or norm2 == 0:
+            return 0.0
+        
+        return dot_product / (norm1 * norm2)
+
+
+vector_store = VectorStore()
+
+
+=======================================================
+app\tools\rag\__init__.py
+
+
+=======================================================
+app\workers\amount_worker.py
+import logging
+from typing import Dict, Any
+from app.core.session import SessionData
+from app.graph.slot_filler import slot_filler
+from app.graph.state_machine import state_machine
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class AmountWorker:
+    """Handles loan amount collection and validation"""
+    
+    async def process(self, user_message: str, session: SessionData) -> Dict[str, Any]:
+        """Process loan amount input"""
+        
+        # Extract loan amount
+        loan_amount = await slot_filler.extract_loan_amount(user_message)
+        
+        if loan_amount:
+            session.update_slot("loan_amount", loan_amount)
+            
+            # Format amount for display
+            formatted_amount = self._format_amount(loan_amount)
+            
+            response = f"Perfect! You're applying for ₹{formatted_amount}. To process your loan, I'll need some documents from you. These include your salary slip, PAN card, and Aadhaar card. Are you ready to upload them?"
+            
+            next_state = state_machine.get_next_state(
+                session.current_state,
+                "amount_provided",
+                {}
+            )
+            if next_state:
+                session.transition_state(next_state)
+            
+            return {
+                "response": response,
+                "state_changed": True,
+                "new_state": session.current_state.value,
+                "slots_updated": {"loan_amount": loan_amount}
+            }
+        
+        else:
+            min_amount = self._format_amount(settings.MIN_LOAN_AMOUNT)
+            max_amount = self._format_amount(settings.MAX_LOAN_AMOUNT)
+            
+            response = f"I couldn't determine the loan amount from your message. Please specify an amount between ₹{min_amount} and ₹{max_amount}."
+            
+            return {
+                "response": response,
+                "state_changed": False,
+                "new_state": session.current_state.value,
+                "slots_updated": {}
+            }
+    
+    def _format_amount(self, amount: float) -> str:
+        """Format amount with commas (Indian numbering)"""
+        amount_str = f"{amount:,.0f}"
+        # Convert to Indian numbering system
+        if amount >= 100000:
+            lakhs = amount / 100000
+            return f"{lakhs:,.2f} lakhs"
+        return amount_str
+
+
+amount_worker = AmountWorker()
+
+
+=======================================================
+app\workers\consent_worker.py
+import logging
+from typing import Dict, Any
+from app.core.session import SessionData
+from app.graph.slot_filler import slot_filler
+from app.graph.state_machine import state_machine
+
+logger = logging.getLogger(__name__)
+
+
+class ConsentWorker:
+    """Handles consent collection"""
+    
+    async def process(self, user_message: str, session: SessionData) -> Dict[str, Any]:
+        """
+        Process consent-related message
+        
+        Returns:
+            Worker result with response and state updates
+        """
+        # Check if consent already given
+        if session.get_slot("consent") is not None:
+            response = "I see you've already provided consent. Let's continue."
+            next_state = state_machine.get_next_state(
+                session.current_state,
+                "consent_given",
+                {}
+            )
+            if next_state:
+                session.transition_state(next_state)
+            
+            return {
+                "response": response,
+                "state_changed": True,
+                "new_state": session.current_state.value,
+                "slots_updated": {}
+            }
+        
+        # Extract consent from message
+        consent_value = await slot_filler.extract_consent(user_message)
+        
+        if consent_value is True:
+            session.update_slot("consent", True)
+            
+            response = "Thank you for your consent. To proceed, I'll need your Customer ID. Could you please provide it?"
+            
+            next_state = state_machine.get_next_state(
+                session.current_state,
+                "consent_given",
+                {}
+            )
+            if next_state:
+                session.transition_state(next_state)
+            
+            return {
+                "response": response,
+                "state_changed": True,
+                "new_state": session.current_state.value,
+                "slots_updated": {"consent": True}
+            }
+        
+        elif consent_value is False:
+            session.update_slot("consent", False)
+            
+            response = "I understand. Without your consent, I won't be able to proceed with the loan application. If you change your mind, feel free to reach out. Have a great day!"
+            
+            next_state = state_machine.get_next_state(
+                session.current_state,
+                "consent_denied",
+                {}
+            )
+            if next_state:
+                session.transition_state(next_state)
+            
+            return {
+                "response": response,
+                "state_changed": True,
+                "new_state": session.current_state.value,
+                "slots_updated": {"consent": False}
+            }
+        
+        else:
+            # Consent not clear, ask again
+            response = "I need your explicit consent to proceed with collecting your information for the loan application. Do you agree to share your details? Please respond with 'yes' or 'no'."
+            
+            return {
+                "response": response,
+                "state_changed": False,
+                "new_state": session.current_state.value,
+                "slots_updated": {}
+            }
+
+
+consent_worker = ConsentWorker()
+
+
+=======================================================
+app\workers\customer_id_worker.py
+import logging
+from typing import Dict, Any
+from app.core.session import SessionData
+from app.graph.slot_filler import slot_filler
+from app.graph.state_machine import state_machine
+from app.mock_services import mock_customer_service
+
+logger = logging.getLogger(__name__)
+
+
+class CustomerIdWorker:
+    """Handles customer ID collection and validation"""
+    
+    async def process(self, user_message: str, session: SessionData) -> Dict[str, Any]:
+        """Process customer ID input"""
+        
+        # Extract customer ID
+        customer_id = await slot_filler.extract_customer_id(user_message)
+        
+        if customer_id:
+            # Validate customer ID
+            is_valid = await mock_customer_service.validate_customer_id(customer_id)
+            
+            if is_valid:
+                session.update_slot("customer_id", customer_id)
+                
+                response = f"Great! I've verified your Customer ID ({customer_id}). Now, how much loan amount are you looking for?"
+                
+                next_state = state_machine.get_next_state(
+                    session.current_state,
+                    "customer_id_provided",
+                    {}
+                )
+                if next_state:
+                    session.transition_state(next_state)
+                
+                return {
+                    "response": response,
+                    "state_changed": True,
+                    "new_state": session.current_state.value,
+                    "slots_updated": {"customer_id": customer_id}
+                }
+            else:
+                response = f"I couldn't verify the Customer ID '{customer_id}'. Please check and provide the correct ID."
+                
+                return {
+                    "response": response,
+                    "state_changed": False,
+                    "new_state": session.current_state.value,
+                    "slots_updated": {}
+                }
+        
+        else:
+            response = "I couldn't find a valid Customer ID in your message. Please provide your Customer ID in the format 'CUST' followed by digits (e.g., CUST123456)."
+            
+            return {
+                "response": response,
+                "state_changed": False,
+                "new_state": session.current_state.value,
+                "slots_updated": {}
+            }
+
+
+customer_id_worker = CustomerIdWorker()
+
+
+=======================================================
+app\workers\decision_worker.py
+import logging
+from typing import Dict, Any
+from app.core.session import SessionData
+from app.graph.state_machine import state_machine
+from app.tools.pdf_generator import pdf_generator
+
+logger = logging.getLogger(__name__)
+
+
+class DecisionWorker:
+    """Handles final loan decision communication with PDF generation"""
+    
+    async def process(self, user_message: str, session: SessionData) -> Dict[str, Any]:
+        """Deliver loan decision and generate PDF document"""
+        
+        underwriting_result = session.get_slot("underwriting_result")
+        
+        if not underwriting_result:
+            return {
+                "response": "There was an issue retrieving your decision. Please contact support.",
+                "state_changed": False,
+                "new_state": session.current_state.value,
+                "slots_updated": {}
+            }
+        
+        decision = underwriting_result.get("decision")
+        reason = underwriting_result.get("reason", "")
+        approved_amount = underwriting_result.get("approved_amount")
+        interest_rate = underwriting_result.get("interest_rate")
+        
+        session.update_slot("decision", decision)
+        
+        # Generate PDF document
+        pdf_path = None
+        try:
+            session_dict = {
+                "customer_id": session.get_slot("customer_id"),
+                "loan_amount": session.get_slot("loan_amount"),
+                "ocr_data": session.get_slot("ocr_data")
+            }
+            
+            if decision == "APPROVED":
+                pdf_path = pdf_generator.generate_approval_letter(
+                    session_dict,
+                    underwriting_result
+                )
+            else:
+                pdf_path = pdf_generator.generate_rejection_letter(
+                    session_dict,
+                    underwriting_result
+                )
+            
+            session.update_slot("decision_document", pdf_path)
+            logger.info(f"Generated decision document: {pdf_path}")
+        
+        except Exception as e:
+            logger.error(f"Failed to generate PDF document: {e}")
+            pdf_path = None
+        
+        # Construct response
+        if decision == "APPROVED":
+            response = f"🎉 Congratulations! Your loan application has been APPROVED!\n\n"
+            response += f"**Approved Amount:** ₹{approved_amount:,.0f}\n"
+            response += f"**Interest Rate:** {interest_rate}% per annum\n"
+            response += f"**Reason:** {reason}\n\n"
+            
+            if pdf_path:
+                response += f"📄 Your official approval letter has been generated and saved at:\n`{pdf_path}`\n\n"
+            
+            response += "You'll receive further instructions via email and SMS. Thank you for choosing TIA Personal Loans!"
+        
+        elif decision == "REJECTED":
+            response = f"Unfortunately, we're unable to approve your loan application at this time.\n\n"
+            response += f"**Reason:** {reason}\n\n"
+            
+            if pdf_path:
+                response += f"📄 A detailed decision letter has been generated at:\n`{pdf_path}`\n\n"
+            
+            response += "You may reapply after addressing the concerns mentioned. If you have questions, please contact our support team."
+        
+        else:
+            response = f"Your application is currently under manual review.\n\n"
+            response += f"**Reason:** {reason}\n\n"
+            
+            if pdf_path:
+                response += f"📄 Status document saved at:\n`{pdf_path}`\n\n"
+            
+            response += "We'll get back to you within 2-3 business days. Thank you for your patience."
+        
+        next_state = state_machine.get_next_state(
+            session.current_state,
+            "decision_delivered",
+            {}
+        )
+        if next_state:
+            session.transition_state(next_state)
+        
+        return {
+            "response": response,
+            "state_changed": True,
+            "new_state": session.current_state.value,
+            "slots_updated": {
+                "decision": decision,
+                "decision_document": pdf_path
+            }
+        }
+
+
+decision_worker = DecisionWorker()
+
+
+=======================================================
+app\workers\document_worker.py
+import logging
+from typing import Dict, Any
+from app.core.session import SessionData
+from app.graph.state_machine import state_machine
+from app.tools.document_ocr.ocr_engine import ocr_engine
+
+logger = logging.getLogger(__name__)
+
+
+class DocumentWorker:
+    """Handles document upload and OCR processing"""
+    
+    async def process_need_docs(self, user_message: str, session: SessionData) -> Dict[str, Any]:
+        """Handle document requirement acknowledgment"""
+        
+        message_lower = user_message.lower()
+        affirmative = any(word in message_lower for word in ["yes", "ready", "sure", "ok", "proceed"])
+        
+        if affirmative:
+            response = "Great! Please upload your documents. You can send them one by one or all together. I support JPG, PNG, and PDF formats."
+            
+            next_state = state_machine.get_next_state(
+                session.current_state,
+                "docs_acknowledged",
+                {}
+            )
+            if next_state:
+                session.transition_state(next_state)
+            
+            return {
+                "response": response,
+                "state_changed": True,
+                "new_state": session.current_state.value,
+                "slots_updated": {}
+            }
+        else:
+            response = "No problem. Take your time. Let me know when you're ready to upload your documents."
+            
+            return {
+                "response": response,
+                "state_changed": False,
+                "new_state": session.current_state.value,
+                "slots_updated": {}
+            }
+    
+    async def process_upload(self, user_message: str, session: SessionData) -> Dict[str, Any]:
+        """Handle document upload (simulated)"""
+        
+        # In a real system, this would process file uploads
+        # For MVP, we simulate document processing
+        
+        message_lower = user_message.lower()
+        if "uploaded" in message_lower or "sent" in message_lower or "here" in message_lower:
+            response = "I've received your documents. Let me process them using OCR. This will take a moment..."
+            
+            # Simulate OCR processing
+            ocr_result = {
+                "salary_slip": {"confidence": 0.85, "data": {"monthly_salary": "75000"}},
+                "pan_card": {"confidence": 0.92, "data": {"pan_number": "ABCDE1234F"}},
+                "aadhaar": {"confidence": 0.88, "data": {"aadhaar_number": "1234-5678-9012"}}
+            }
+            
+            session.update_slot("ocr_data", ocr_result)
+            
+            # Transition to confirmation
+            next_state = state_machine.get_next_state(
+                session.current_state,
+                "docs_uploaded",
+                {}
+            )
+            if next_state:
+                session.transition_state(next_state)
+            
+            # Prepare confirmation message
+            response += "\n\nI've extracted the following information:\n"
+            response += f"- Monthly Salary: ₹{ocr_result['salary_slip']['data']['monthly_salary']}\n"
+            response += f"- PAN Number: {ocr_result['pan_card']['data']['pan_number']}\n"
+            response += f"- Aadhaar: {ocr_result['aadhaar']['data']['aadhaar_number']}\n\n"
+            response += "Is this information correct?"
+            
+            return {
+                "response": response,
+                "state_changed": True,
+                "new_state": session.current_state.value,
+                "slots_updated": {"ocr_data": ocr_result}
+            }
+        else:
+            response = "Please upload your documents (salary slip, PAN, Aadhaar). You can say 'uploaded' or 'sent' once you've shared them."
+            
+            return {
+                "response": response,
+                "state_changed": False,
+                "new_state": session.current_state.value,
+                "slots_updated": {}
+            }
+    
+    async def process_confirm(self, user_message: str, session: SessionData) -> Dict[str, Any]:
+        """Handle OCR confirmation"""
+        
+        message_lower = user_message.lower()
+        confirmed = any(word in message_lower for word in ["yes", "correct", "right", "accurate"])
+        
+        if confirmed:
+            response = "Perfect! I'm now processing your loan application through our underwriting system. This will take a few seconds..."
+            
+            next_state = state_machine.get_next_state(
+                session.current_state,
+                "ocr_confirmed",
+                {}
+            )
+            if next_state:
+                session.transition_state(next_state)
+            
+            return {
+                "response": response,
+                "state_changed": True,
+                "new_state": session.current_state.value,
+                "slots_updated": {}
+            }
+        else:
+            response = "I understand there's an issue with the extracted data. Please re-upload your documents so I can process them again."
+            
+            next_state = state_machine.get_next_state(
+                session.current_state,
+                "ocr_rejected",
+                {}
+            )
+            if next_state:
+                session.transition_state(next_state)
+            
+            return {
+                "response": response,
+                "state_changed": True,
+                "new_state": session.current_state.value,
+                "slots_updated": {}
+            }
+
+
+document_worker = DocumentWorker()
+
+
+=======================================================
+app\workers\underwriting_worker.py
+import logging
+from typing import Dict, Any
+from app.core.session import SessionData
+from app.graph.state_machine import state_machine
+from app.mock_services import mock_underwriting_service
+
+logger = logging.getLogger(__name__)
+
+
+class UnderwritingWorker:
+    """Handles loan underwriting simulation"""
+    
+    async def process(self, user_message: str, session: SessionData) -> Dict[str, Any]:
+        """Process underwriting"""
+        
+        # Gather all required data
+        loan_amount = session.get_slot("loan_amount")
+        customer_id = session.get_slot("customer_id")
+        ocr_data = session.get_slot("ocr_data")
+        
+        # Perform underwriting
+        underwriting_result = await mock_underwriting_service.assess_loan(
+            customer_id=customer_id,
+            loan_amount=loan_amount,
+            income_data=ocr_data.get("salary_slip", {}).get("data", {})
+        )
+        
+        session.update_slot("underwriting_result", underwriting_result)
+        
+        response = "Underwriting complete! I have your loan decision ready."
+        
+        next_state = state_machine.get_next_state(
+            session.current_state,
+            "underwriting_completed",
+            {}
+        )
+        if next_state:
+            session.transition_state(next_state)
+        
+        return {
+            "response": response,
+            "state_changed": True,
+            "new_state": session.current_state.value,
+            "slots_updated": {"underwriting_result": underwriting_result}
+        }
+
+
+underwriting_worker = UnderwritingWorker()
+
+
+=======================================================
+app\workers\__init__.py
+
+
