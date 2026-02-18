@@ -1,15 +1,14 @@
 ## Quick Start
 
-### 1) Fork and clone
+### 1) Clone the repository
 
-1. Fork this repository in GitHub.
-2. Copy your fork URL and clone it:
+1. Clone the repository:
 
 ```bash
-git clone <your-fork-url>
+git clone <repo-url>
 ```
 
-3. Move into the project folder:
+2. Move into the project folder:
 
 ```bash
 cd ey-techathon
@@ -81,6 +80,30 @@ Linux (minimal):
 sudo apt update
 sudo apt install -y tesseract-ocr
 ```
+
+### 2b) Configure Hugging Face API key (required)
+
+The backend requires a Hugging Face API key. If it is missing, you will see:
+"HuggingFace API key is required. Set HF_API_KEY or HUGGINGFACEHUB_API_TOKEN in .env"
+
+1. Copy the example env file:
+	`backend/.env.example` -> `backend/.env`
+2. Add your key (use one line):
+
+```env
+HF_API_KEY="your_hf_api_key_here"
+```
+
+If you do not have an API key yet, create one at:
+https://huggingface.co/settings/tokens
+
+Windows PowerShell (optional alternative):
+
+```powershell
+setx HF_API_KEY "your_hf_api_key_here"
+```
+
+If you set it via `setx`, open a new terminal so the variable is available.
 
 ### 3) Run the project
 

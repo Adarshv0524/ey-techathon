@@ -14,7 +14,7 @@ def main() -> None:
     sys.path.insert(0, str(backend_dir))
 
     uvicorn.run(
-        "main:app",
+        "app.main:app",
         host="127.0.0.1",
         port=8001,
         reload=True,

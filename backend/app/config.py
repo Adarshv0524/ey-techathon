@@ -1,14 +1,15 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
+from pathlib import Path
 import os
 import platform
 
 
 class Settings(BaseSettings):
     """Application configuration"""
-    
+
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(Path(__file__).resolve().parents[1] / ".env"),
         case_sensitive=True,
         extra='ignore'  # Ignore extra fields
     )
