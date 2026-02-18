@@ -10,13 +10,13 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parent
     backend_dir = repo_root / "backend"
 
-    # Ensure `import app` resolves to backend/app when launched from repo root.
+    # Ensure `import app` resolves to backend when launched from repo root.
     sys.path.insert(0, str(backend_dir))
 
     uvicorn.run(
-        "app.main:app",
+        "main:app",
         host="127.0.0.1",
-        port=8000,
+        port=8001,
         reload=True,
     )
 

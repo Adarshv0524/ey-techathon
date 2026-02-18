@@ -1,22 +1,39 @@
-# app/api/faq.py
-
-from fastapi import APIRouter
+import logging
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from app.core.rag import answer_from_policy_docs
+from app.tools.rag.rag_engine import rag_engine
 
-router = APIRouter()
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/faq", tags=["faq"])
 
 
-class FaqRequest(BaseModel):
+class FAQRequest(BaseModel):
     question: str
 
 
-class FaqResponse(BaseModel):
+class FAQResponse(BaseModel):
     answer: str
-    snippets: list[str]
+    sources: list
+    confidence: float
 
 
-@router.post("/faq/query", response_model=FaqResponse)
-def faq(payload: FaqRequest):
-    answer, snippets = answer_from_policy_docs(payload.question)
-    return FaqResponse(answer=answer, snippets=snippets)
+@router.post("/ask", response_model=FAQResponse)
+async def ask_question(request: FAQRequest):
+    """
+    Standalone FAQ endpoint using RAG
+    
+    Answers loan policy questions without session context
+    """
+    try:
+        result = await rag_engine.query(request.question, top_k=3)
+        
+        return FAQResponse(
+            answer=result["answer"],
+            sources=result["sources"],
+            confidence=result["confidence"]
+        )
+    
+    except Exception as e:
+        logger.error(f"Error in FAQ query: {e}")
+        raise HTTPException(status_code=500, detail="Failed to process question")

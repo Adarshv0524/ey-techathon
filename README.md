@@ -1,21 +1,45 @@
-## Run (Windows)
+## Setup
 
-1. Activate venv:
+### Prerequisites
+
+- Python 3.10+ installed
+
+### Install Python dependencies
+
+All required Python libraries are listed in [requirements.txt](requirements.txt).
+
+1. Create and activate a virtual environment:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+```
+
+Windows PowerShell:
 
 ```powershell
 .\venv\Scripts\Activate.ps1
 ```
 
-2. Start backend (port 8000):
+2. Install dependencies:
 
-```powershell
-python .\run_backend.py
+```bash
+python -m pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-3. Start frontend (port 5000) in another terminal:
+## Run
 
-```powershell
-python .\run_frontend.py
+1. Start backend (port 8001):
+
+```bash
+python run_backend.py
 ```
 
-Open `http://127.0.0.1:5000/`.
+2. Start frontend (port 5000) in another terminal:
+
+```bash
+python run_frontend.py
+```
+
+Open http://127.0.0.1:5000/.
